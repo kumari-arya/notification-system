@@ -1,0 +1,102 @@
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: notif-kafka
+    environment:
+      - KAFKA_NODE_ID=0
+      - KAFKA_PROCESS_ROLES=controller,broker
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: notif-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: notif-postgres
+    environment:
+      POSTGRES_USER: notifuser
+      POSTGRES_PASSWORD: devpass
+      POSTGRES_DB: notifications
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notifuser -d notifications"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Optional: a UI to inspect Kafka topics/messages visually instead of the CLI.
+  # Comment this out if you don't want the extra container.
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: notif-kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=local
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+    depends_on:
+      - kafka
+
+  ingest-api:
+    build: ../services/ingest-api
+    container_name: notif-ingest-api
+    environment:
+      # Inside Docker's network, services reach each other by container
+      # name, not localhost — this is the internal PLAINTEXT listener
+      # (kafka:9092), different from the localhost:29092 you used when
+      # running the service directly on your machine.
+      - KAFKA_BROKERS=kafka:9092
+      - PORT=3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  worker:
+    build: ../services/worker
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgres://notifuser:devpass@postgres:5432/notifications
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    deploy:
+      replicas: 3   # this is the horizontal scaling we'll observe in K8s next
+
+volumes:
+  kafka_data:
+  pg_data:
