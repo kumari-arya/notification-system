@@ -9,8 +9,10 @@ const { Pool } = pg;
 const connectionString =
   process.env.DATABASE_URL ??
   "postgres://notifuser:devpass@localhost:5432/notifications";
-
-export const pool = new Pool({ connectionString });
+const isRds = connectionString.includes("rds.amazonaws.com");
+export const pool = new Pool({ connectionString,
+   ssl: isRds ? { rejectUnauthorized: false } : undefined,
+ });
 
 /**
  * The real correctness gate (from our design discussion).
